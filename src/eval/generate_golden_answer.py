@@ -1,55 +1,66 @@
 import os
 import json
+import re
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
-import requests
-import re
 
-def clean_json_output(text):
-    # Remove code block markers (```json ... ```)
-    cleaned = re.sub(r"^```json", "", text.strip())
-    cleaned = re.sub(r"^```", "", cleaned.strip())
-    cleaned = re.sub(r"```$", "", cleaned.strip())
-    return cleaned.strip()
-# Load environment variables (make sure .env exists at project root)
+# Load environment variables from .env
 load_dotenv()
 
 # --- Configuration ---
-RESUMES_DIR = Path("data/processed_resumes")
+RESUMES_DIR = Path("data/processed_resumes_sample")
 QUERIES_FILE = Path("data/test_queries.json")
 OUTPUT_MATRIX_FILE = Path("data/gold_query_matrix.json")
 
-# --- LLM API configuration via Azure OpenAI ---
+# Azure OpenAI config
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
 
-# --- Helper Functions ---
+# --- Utility Functions ---
+
+def clean_json_output(text):
+    cleaned = re.sub(r"^```json", "", text.strip())
+    cleaned = re.sub(r"^```", "", cleaned.strip())
+    cleaned = re.sub(r"```$", "", cleaned.strip())
+    return cleaned.strip()
 
 def load_test_queries():
     with open(QUERIES_FILE, "r", encoding="utf-8") as f:
-        queries = json.load(f)  # Expecting a list of queries
-    return queries
+        return json.load(f)
 
-def load_existing_matrix():
+def load_existing_matrix(queries):
     if OUTPUT_MATRIX_FILE.exists():
         with open(OUTPUT_MATRIX_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    else:
-        # Initialize matrix: each key is "query_0", "query_1", ... for each query in the list
-        queries = load_test_queries()
-        return {f"query_{i}": {} for i in range(len(queries))}
+            try:
+                structured_data = json.load(f)
+                matrix = {}
+                for item in structured_data:
+                    matrix[item["query_id"]] = item["results"]
+                return matrix
+            except Exception as e:
+                print("⚠️ Error loading existing matrix, starting fresh.")
+    return {f"query_{i}": {} for i in range(len(queries))}
 
-def save_matrix(matrix):
+def save_matrix(matrix, queries):
+    structured_data = []
+    for i, query_text in enumerate(queries):
+        key = f"query_{i}"
+        structured_data.append({
+            "query_id": key,
+            "query_text": query_text,
+            "results": matrix.get(key, {})
+        })
+
     OUTPUT_MATRIX_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_MATRIX_FILE, "w", encoding="utf-8") as f:
-        json.dump(matrix, f, indent=2, ensure_ascii=False)
+        json.dump(structured_data, f, indent=2, ensure_ascii=False)
 
 def is_resume_processed(matrix, resume_filename):
-    # Check if this resume already appears in any query entry
-    for mapping in matrix.values():
-        if resume_filename in mapping:
+    for entry in matrix.values():
+        if resume_filename in entry:
             return True
     return False
 
@@ -86,12 +97,9 @@ def build_prompt(resume_content, queries):
         "  ...\n"
         "}"
     )
-
     return prompt
 
-
 def call_llm(prompt):
-    # Call Azure OpenAI API with the prompt and return the parsed JSON response.
     headers = {
         "Content-Type": "application/json",
         "api-key": AZURE_OPENAI_API_KEY,
@@ -111,33 +119,27 @@ def call_llm(prompt):
         result = response.json()
         content = result["choices"][0]["message"]["content"]
         cleaned = clean_json_output(content)
-
-        # 🧾 Debug print
         print("\n🧾 Cleaned LLM Response (first 300 chars):")
         print(cleaned[:300])
-
         return json.loads(cleaned)
     except Exception as e:
         print(f"❌ LLM call failed: {e}")
         return None
 
 def process_resume(resume_file, queries, matrix):
-    # Load the processed resume JSON (expects keys "file" and "content")
     with open(resume_file, "r", encoding="utf-8") as f:
         resume_data = json.load(f)
-    resume_filename = resume_data.get("file", resume_file.name)
+    resume_filename = Path(resume_file.name).name.strip()
     resume_content = resume_data.get("content", "")
-    
-    # Build the prompt for this resume
+
     prompt = build_prompt(resume_content, queries)
-    print(f"🔍 Calling LLM for {resume_filename}...")
-    
+    print(f"\n🔍 Calling LLM for {resume_filename}...")
+
     llm_response = call_llm(prompt)
     if not llm_response:
         print(f"⚠️  No response for {resume_filename}. Skipping.")
         return
-    
-    # Expect llm_response to be a dict with keys "query_0", "query_1", ... up to len(queries)
+
     for i in range(len(queries)):
         key = f"query_{i}"
         evidence = llm_response.get(key)
@@ -146,18 +148,20 @@ def process_resume(resume_file, queries, matrix):
 
 def main():
     queries = load_test_queries()
-    matrix = load_existing_matrix()
-    resume_files = list(RESUMES_DIR.glob("*"))
-    print(f"🔍 Found {len(resume_files)} processed resume files to evaluate.\n")
-    
+    matrix = load_existing_matrix(queries)
+    resume_files = list(RESUMES_DIR.glob("*.json"))
+    print(f"📄 Found {len(resume_files)} processed resume files.\n")
+
     for resume_file in resume_files:
-        if is_resume_processed(matrix, resume_file.name):
-            print(f"⏩ Skipping {resume_file.name} (already processed).")
+        resume_name = Path(resume_file.name).name.strip()
+        if is_resume_processed(matrix, resume_name):
+            print(f"⏩ Skipping {resume_name} (already processed).")
             continue
         process_resume(resume_file, queries, matrix)
-        save_matrix(matrix)
-    
-    print("✅ All resumes processed. Output saved to:", OUTPUT_MATRIX_FILE)
+        save_matrix(matrix, queries)
+
+    print("\n✅ All resumes processed.")
+    print(f"📁 Final output saved to: {OUTPUT_MATRIX_FILE}")
 
 if __name__ == "__main__":
     main()
