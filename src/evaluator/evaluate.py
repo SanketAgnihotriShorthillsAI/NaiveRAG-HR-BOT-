@@ -51,75 +51,107 @@ async def call_azure_llm(prompt: str) -> str:
         return r.json()["choices"][0]["message"]["content"]
 
 # Prompt templates
-def make_faithfulness_prompt(golden_entries, answer_text):
-    golden_bullets = "\n".join([f"{i+1}. {entry['answer']}" for i, entry in enumerate(golden_entries)])
+def make_faithfulness_prompt(golden: str, generated: str) -> str:
     return f"""
-You're evaluating how faithful a generated answer is to the golden answers from resumes.
+You are an AI evaluator checking the faithfulness of a generated RAG answer against a golden reference answer.
 
-Golden Answers:
-{golden_bullets}
+The goal is to verify whether the generated answer correctly includes the people listed in the golden answer. You do **not** need to verify the details *about* the people — only whether the **correct names** are included or omitted.
+
+Golden Answer (reference list of people):
+\"\"\"{golden}\"\"\"
 
 Generated Answer:
-\"\"\"{answer_text}\"\"\"
+\"\"\"{generated}\"\"\"
 
 Instructions:
-- Score from 0–10 for how well this answer reflects the **relevant people** mentioned in golden answers.
-- Ignore how much content is matched — focus on the **correct people being included or excluded**.
-- Do NOT penalize for missing job details or structure mismatches.
-- Return response in **this JSON format only**:
+- Judge whether the expected people are mentioned.
+- Do NOT penalize the answer for summarizing or changing the format of the information.
+- If some expected names are missing, note them.
+- If extra names appear (not in the golden answer), list them as hallucinations.
+- Give a score between 0 and 10 based on how many correct names were retrieved.
+
+💡 **Scoring must be aligned with match coverage**:
+- 0 = 0% of expected names mentioned
+- 5 = ~50% of expected names mentioned
+- 10 = All or nearly all expected names correctly mentioned
+
+Return only a valid JSON with this format:
 
 {{
-  "score": <0–10>,
-  "missing_info": "...",
-  "noise": "..."
+  "score": <integer between 0-10>,
+  "missing_info": "<comma-separated missing names or 'N/A'>",
+  "noise": "<hallucinated names or 'N/A'>",
+  "percent_matched": "<X% of expected names mentioned>"
 }}
 """
 
-def make_context_recall_prompt(golden_entries, context):
-    golden_bullets = "\n".join([f"{i+1}. {entry['answer']}" for i, entry in enumerate(golden_entries)])
-    return f"""
-You're evaluating if the golden answers from resumes are findable in the retrieved context chunks.
 
-Golden Answers:
-{golden_bullets}
+def make_context_recall_prompt(golden: str, context: str) -> str:
+    return f"""
+You are evaluating if the golden answer is properly supported by the retrieved context chunks.
+
+The focus is on whether the context contains enough evidence to support the people listed in the golden answer — even if the exact sentence or structure differs.
+
+Golden Answer (expected people):
+\"\"\"{golden}\"\"\"
 
 Retrieved Context:
 \"\"\"{context}\"\"\"
 
 Instructions:
-- Score from 0–10 based on whether the **right names/resumes** mentioned in golden answers are supported by context.
-- We do NOT care about job details — only presence/absence of names.
-- Focus only on whether someone should have been found in context.
-- Return response in **this JSON format only**:
+- Your job is NOT to judge the final answer — only whether this context could have helped an LLM get the correct people.
+- Identify any expected people missing from the context.
+- Ignore formatting or paraphrasing.
+- Give a score between 0 and 10 based on how well the context supports the golden answer.
+
+💡 **Scoring must be aligned with match coverage**:
+- 0 = 0% of expected names found in context
+- 5 = ~50% of expected names found
+- 10 = All or nearly all expected names clearly supported
+
+Return only a valid JSON with this format:
 
 {{
-  "score": <0–10>,
-  "missing_info": "...",
-  "noise": "N/A"
+  "score": <integer between 0-10>,
+  "missing_info": "<comma-separated missing names or 'N/A'>",
+  "percent_matched": "<X% of golden names found in context>"
 }}
 """
+
+
 
 def make_resume_mention_prompt(golden_entries, answer_text):
     expected_names = [entry["resume"] for entry in golden_entries]
     names_list = "\n".join(f"- {name}" for name in expected_names)
     return f"""
-Check if the following resume owners were mentioned in the generated answer.
+You are verifying whether the correct resume names were mentioned in a generated answer.
 
-Expected Resumes:
-{names_list}
+Expected Resume Names (from golden answer):
+\"\"\"{names_list}\"\"\"
 
 Generated Answer:
 \"\"\"{answer_text}\"\"\"
 
 Instructions:
-- Score from 0–10 based on how well these resume names are covered.
-- Do not penalize if detailed content is missing — care only about **name mentions**.
-- Return response in **this JSON format only**:
+- Check if the expected names or people are mentioned in the answer.
+- Do NOT be strict on name formatting (e.g., "Neha Resume.pdf" → "Neha" is fine).
+- If some are missing, list them.
+- If the answer mentions people who were not in the golden list, flag them as hallucinated.
+- Do NOT be strict on name formatting (e.g., "Neha Resume.pdf" → "Neha" is fine).
+- Score from 0 to 10 based on how many expected names were retrieved.
+
+💡 **Scoring must be aligned with match coverage**:
+- 0 = None of the expected resumes are mentioned
+- 5 = ~50% of expected resumes are correctly included
+- 10 = All or nearly all resume names are correctly mentioned
+
+Return only a valid JSON with this format:
 
 {{
-  "score": <0–10>,
-  "missing_info": "Names not mentioned...",
-  "noise": "Extra names/hallucinations"
+  "score": <integer between 0-10>,
+  "missing_info": "<comma-separated missing names or 'N/A'>",
+  "noise": "<hallucinated names or 'N/A'>",
+  "percent_matched": "<X% of expected resumes mentioned>"
 }}
 """
 
@@ -134,9 +166,20 @@ async def run_all_evals(query, golden_entry, log_entry):
         prompt = make_faithfulness_prompt(golden_entry, answer)
         try:
             print("🔍 [FAITHFULNESS]")
+            llm_raw = await call_azure_llm(prompt)
+            try:
+                parsed = json.loads(llm_raw)
+            except Exception as e:
+                print(f"⚠️ Error parsing faithfulness response for '{query[:40]}': {e}")
+                parsed = {}
+
             return {
                 "query": query,
-                "llm_response": await call_azure_llm(prompt),
+                "llm_response": llm_raw,
+                "score": parsed.get("score"),
+                "missing_info": parsed.get("missing_info"),
+                "noise": parsed.get("noise"),
+                "percent_matched": parsed.get("percent_matched"),
             }
         except Exception as e:
             return {"query": query, "llm_response": f"Error: {str(e)}"}
@@ -145,9 +188,19 @@ async def run_all_evals(query, golden_entry, log_entry):
         prompt = make_context_recall_prompt(golden_entry, context)
         try:
             print("🔍 [CONTEXT]")
+            llm_raw = await call_azure_llm(prompt)
+            try:
+                parsed = json.loads(llm_raw)
+            except Exception as e:
+                print(f"⚠️ Error parsing context recall response for '{query[:40]}': {e}")
+                parsed = {}
+
             return {
                 "query": query,
-                "llm_response": await call_azure_llm(prompt),
+                "llm_response": llm_raw,
+                "score": parsed.get("score"),
+                "missing_info": parsed.get("missing_info"),
+                "percent_matched": parsed.get("percent_matched"),
             }
         except Exception as e:
             return {"query": query, "llm_response": f"Error: {str(e)}"}
@@ -156,9 +209,20 @@ async def run_all_evals(query, golden_entry, log_entry):
         prompt = make_resume_mention_prompt(golden_entry, answer)
         try:
             print("🔍 [RESUME NAMES]")
+            llm_raw = await call_azure_llm(prompt)
+            try:
+                parsed = json.loads(llm_raw)
+            except Exception as e:
+                print(f"⚠️ Error parsing resume mention response for '{query[:40]}': {e}")
+                parsed = {}
+
             return {
                 "query": query,
-                "llm_response": await call_azure_llm(prompt),
+                "llm_response": llm_raw,
+                "score": parsed.get("score"),
+                "missing_info": parsed.get("missing_info"),
+                "noise": parsed.get("noise"),
+                "percent_matched": parsed.get("percent_matched"),
             }
         except Exception as e:
             return {"query": query, "llm_response": f"Error: {str(e)}"}
