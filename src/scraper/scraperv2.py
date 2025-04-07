@@ -88,8 +88,8 @@ def process_resume(file_path, output_path):
         raw_text = normalize_whitespace(raw_text)
         raw_text = space_out_section_headers(raw_text)
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump({"raw_text": raw_text}, f, indent=2)
+        with open(output_path, "w", encoding="utf-8", ) as f:
+            json.dump({"raw_text": raw_text}, f, indent=2, ensure_ascii=False)
 
         logging.info(f"✅ Processed: {file_path}")
     except Exception as e:
