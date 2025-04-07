@@ -1,4 +1,3 @@
-# Save this as evaluate.py
 import os
 import json
 import asyncio
@@ -6,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import httpx
 from typing import List, Dict
-
+import argparse
 # Load env
 load_dotenv()
 
@@ -69,6 +68,8 @@ Instructions:
 - If some expected names are missing, note them.
 - If extra names appear (not in the golden answer), list them as hallucinations.
 - Give a score between 0 and 10 based on how many correct names were retrieved.
+- Special Case: If the list of expected resumes is empty, it means no resumes should be mentioned in the answer.
+If any names appear in the answer, they must be treated as hallucinations and the score should be 0.
 
 💡 **Scoring must be aligned with match coverage**:
 - 0 = 0% of expected names mentioned
@@ -139,6 +140,8 @@ Instructions:
 - If the answer mentions people who were not in the golden list, flag them as hallucinated.
 - Do NOT be strict on name formatting (e.g., "Neha Resume.pdf" → "Neha" is fine).
 - Score from 0 to 10 based on how many expected names were retrieved.
+- Special Case: If the list of expected resumes is empty, it means no resumes should be mentioned in the answer.
+If any names appear in the answer, they must be treated as hallucinations and the score should be 0.
 
 💡 **Scoring must be aligned with match coverage**:
 - 0 = None of the expected resumes are mentioned
@@ -232,7 +235,37 @@ async def run_all_evals(query, golden_entry, log_entry):
 # Run pipeline
 async def evaluate_pipeline(name: str, logs: List[Dict], golden_answers: Dict):
     print(f"\n🚀 Starting evaluation for: {name.upper()} | Total queries: {len(logs)}\n")
-    all_results = {"faithfulness": [], "context": [], "resume": []}
+
+    output_file = OUTPUT_DIR / f"{name}_evaluations.json"
+
+    # Initialize maps to avoid duplicates and allow overriding
+    faithfulness_map = {}
+    context_map = {}
+    resume_map = {}
+
+    already_evaluated = set()
+
+    # Load existing results if available
+    if output_file.exists():
+        print(f"🔁 Loading previously saved results from {output_file}")
+        with open(output_file, "r", encoding="utf-8") as f:
+            previous = json.load(f)
+
+        faithfulness_map = {entry["query"]: entry for entry in previous.get("faithfulness", [])}
+        context_map = {entry["query"]: entry for entry in previous.get("context", [])}
+        resume_map = {entry["query"]: entry for entry in previous.get("resume", [])}
+
+        # Mark queries as fully evaluated only if all 3 are valid
+        for q in faithfulness_map:
+            f = faithfulness_map.get(q)
+            c = context_map.get(q)
+            r = resume_map.get(q)
+            if (
+                f and isinstance(f.get("llm_response"), str) and not f["llm_response"].startswith("Error:")
+                and c and isinstance(c.get("llm_response"), str) and not c["llm_response"].startswith("Error:")
+                and r and isinstance(r.get("llm_response"), str) and not r["llm_response"].startswith("Error:")
+            ):
+                already_evaluated.add(q)
 
     for idx, log_entry in enumerate(logs, 1):
         query = log_entry["query"]
@@ -240,30 +273,47 @@ async def evaluate_pipeline(name: str, logs: List[Dict], golden_answers: Dict):
             print(f"⚠️  Skipping query not in golden set: '{query[:60]}...'")
             continue
 
+        if query in already_evaluated:
+            print(f"⏩ Skipping previously evaluated query: '{query[:60]}...'")
+            continue
+
         print(f"\n🔹 [{idx}/{len(logs)}] Query:\n{query[:80]}...\n")
         golden_entry = golden_answers[query]
 
         faith, ctx, resume = await run_all_evals(query, golden_entry, log_entry)
-        all_results["faithfulness"].append(faith)
-        all_results["context"].append(ctx)
-        all_results["resume"].append(resume)
 
-    output_file = OUTPUT_DIR / f"{name}_evaluations.json"
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
+        # Overwrite or add new entries
+        faithfulness_map[query] = faith
+        context_map[query] = ctx
+        resume_map[query] = resume
+
+        # Save incrementally
+        all_results = {
+            "faithfulness": list(faithfulness_map.values()),
+            "context": list(context_map.values()),
+            "resume": list(resume_map.values()),
+        }
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
 
     print(f"\n✅ Saved evaluation results for {name.upper()} to: {output_file}\n")
 
 # MAIN
 async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pipeline", required=True, choices=["naive", "optimize"], help="Pipeline to evaluate")
+    args = parser.parse_args()
+
     print("📥 Loading input files...")
     golden = load_json(GOLDEN_ANSWER_FILE)
     golden_map = {k: v for k, v in golden.items()}
     naive_logs = load_json(NAIVE_LOGS_FILE)
     optimize_logs = load_json(OPTIMIZE_LOGS_FILE)
 
-    await evaluate_pipeline("naive", naive_logs, golden_map)
-    await evaluate_pipeline("optimize", optimize_logs, golden_map)
+    if args.pipeline == "naive":
+        await evaluate_pipeline("naive", naive_logs, golden_map)
+    elif args.pipeline == "optimize":
+        await evaluate_pipeline("optimize", optimize_logs, golden_map)
 
 if __name__ == "__main__":
     asyncio.run(main())
