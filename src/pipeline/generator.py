@@ -49,8 +49,9 @@ class Generator:
             self.model = genai.GenerativeModel(gemini_model)
             logging.info(f"🔌 Using Gemini: {gemini_model}")
 
-    def generate_response(self, query, retrieved_chunks):
-        return asyncio.run(self._generate(query, retrieved_chunks))
+    async def generate_response(self, query, retrieved_chunks):
+        return await self._generate(query, retrieved_chunks)
+
 
     async def _generate(self, query, retrieved_chunks):
         logging.info(f"🧠 Generating response for query: {query}")
@@ -88,6 +89,7 @@ Ensure the response directly addresses the HR query and helps in decision-making
 ---Response Rules---
 
 - Target format and length: as suited per the query.
+- Name will be mentioned first thing in the context or in metadata. Use it in the response.
 - Do not assume anything. 
 - Use markdown formatting with headings, bullets, or tables where applicable
 - Do not expose any critical personal information (except name), specifically phone numbers and email addresses, DOB even if they appear in the Knowledge Base. Redact or omit them entirely.
@@ -117,6 +119,8 @@ Ensure the response directly addresses the HR query and helps in decision-making
             else:
                 response = self.model.generate_content(prompt)
                 result = response.text.strip()
+            
+            append_naive_log(query, context, result)
 
             return result, result
 
@@ -149,4 +153,25 @@ Ensure the response directly addresses the HR query and helps in decision-making
             res.raise_for_status()
             response = res.json()
             return response["choices"][0]["message"]["content"]
- 
+
+import json
+
+def append_naive_log(query, context, response, log_path="naiveRag_query_logs.json"):
+    entry = {
+        "query": query,
+        "context": context,
+        "response": response
+    }
+
+    if not os.path.exists(log_path):
+        with open(log_path, "w") as f:
+            json.dump([], f)
+
+    with open(log_path, "r+", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            data = []
+        data.append(entry)
+        f.seek(0)
+        json.dump(data, f, indent=2, ensure_ascii=False)

@@ -6,3 +6,6 @@ __pycache__/
 data/
 logs/
 .env
+
+*.xlsx
+compare/*.json

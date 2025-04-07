@@ -26,7 +26,7 @@ model_choice = st.sidebar.radio("Choose LLM", ["Gemini", "OpenAI", "OptimizeRag 
 use_openai = model_choice == "OpenAI"
 use_optimize_llm = model_choice == "OptimizeRag LLM"
 
-top_k = st.sidebar.slider("Top K Chunks", min_value=3, max_value=600, value=60)
+top_k = st.sidebar.slider("Top K Chunks", min_value=3, max_value=600, value=100)
 
 if st.sidebar.button("🔄 Reload Pipeline"):
     st.session_state.rag_pipeline = RAGPipeline(
