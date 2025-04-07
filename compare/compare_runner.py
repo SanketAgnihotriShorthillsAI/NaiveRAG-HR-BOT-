@@ -27,7 +27,7 @@ def query_optimize_rag(query):
 def query_local_rag(query):
     payload = {
         "query": query,
-        "top_k": 200,
+        "top_k": 100,
         "use_openai": False,
         "use_optimize_llm": True
     }
