@@ -60,6 +60,8 @@ Retrieved Context:
 \"\"\"{context}\"\"\"
 
 Instructions:
+-Do NOT be strict on name formatting:
+For example, if the candidate’s name appears as "Neha Resume.pdf" or "Neha-Resume.pdf", you should interpret it simply as "Neha" without penalizing the response for including file extensions or minor formatting differences.
 - First, check if every expected candidate name is mentioned in the context.
 - Then, for each mentioned name, verify that there is sufficient supporting detail (e.g., descriptions of roles, achievements, metrics) that clearly justifies its inclusion.
 - Explicitly state if the evidence is missing entirely, present but insufficient, or if both issues exist.
@@ -74,10 +76,10 @@ Return only a valid JSON object with exactly these keys:
 }}
 """
 
-# Revised prompt for Context Precision with additional instructions on grounding
+# Revised prompt for Context Precision (Updated to evaluate the same evidence as Recall, but with precision criteria)
 def make_context_precision_prompt(golden: str, context: str) -> str:
     return f"""
-You are evaluating the relevance of the retrieved context with respect to the supporting evidence expected for the candidate names in the golden answer.
+You are evaluating the relevance and focus of the retrieved context with respect to the supporting evidence expected for the candidate names as specified in the golden answer.
 
 Golden Answer (expected supporting evidence for candidates):
 \"\"\"{golden}\"\"\"
@@ -86,12 +88,47 @@ Retrieved Context:
 \"\"\"{context}\"\"\"
 
 Instructions:
-- Evaluate how focused the context is on the necessary supporting evidence.
-- Identify if the context includes extraneous or irrelevant details.
-- Explicitly state whether the context is tightly focused or if it includes unnecessary information that detracts from the grounding.
-- Also, mention if the context is properly grounded with clear links between evidence and candidate names.
-- Provide a fractional score between 0 and 1 (e.g., 0.7 means 70% of the context is relevant).
+- Check if every expected candidate name is mentioned and, for each name, verify that there is sufficient supporting detail (e.g., role descriptions, achievements, metrics) that justifies its inclusion.
+-Do NOT be strict on name formatting: 
+    1.For example, if the candidate’s name appears as "Neha Resume.pdf" or "Neha-Resume.pdf", you should interpret it simply as "Neha" without penalizing the response for including file extensions or minor formatting differences.
+    2.In some cases, the candidate's name may appear in a cluttered or non-standard format and might be positioned above the relevant details. Keep this in mind when interpreting responses, especially for name-based queries.
+- In addition, assess whether the context includes extraneous or irrelevant details that do not contribute to this evidence.
+- Explicitly state if:
+   1. All expected candidate names and evidence are present without extraneous content.
+   2. Some expected names/evidence are present but are mixed with a lot of irrelevant details.
+   3. Some expected names/evidence are missing or the supporting details are insufficient.
+- Provide a fractional score between 0 and 1 where a higher score means the context is highly focused and contains little irrelevant information, while a lower score indicates that much of the context is extraneous relative to the expected evidence.
 - Provide a single concise sentence as your explanation.
+
+Return only a valid JSON object with exactly these keys:
+{{
+  "score": <fraction between 0 and 1>,
+  "reason": "<a single, concise sentence explaining your evaluation>"
+}}
+"""
+
+
+# New prompt for Faithfulness Evaluation
+def make_faithfulness_prompt(golden: str, generated: str) -> str:
+    return f"""
+You are evaluating the faithfulness of a generated answer against a golden reference answer that lists expected candidate names and supporting evidence.
+
+Golden Answer (expected candidate names and supporting evidence):
+\"\"\"{golden}\"\"\"
+
+Generated Answer:
+\"\"\"{generated}\"\"\"
+
+Instructions:
+- Check if each expected candidate name is present in the generated answer.
+- Determine if the generated answer includes sufficient supporting details (e.g., role descriptions, achievements, metrics) for each name.
+- Clearly state in your explanation if:
+    1. Some expected names are completely missing.
+    2. Some names are mentioned but without adequate supporting details.
+    3. Both issues exist.
+- Do not penalize for minor formatting differences or extra non-critical text.
+- Provide a fractional score between 0 and 1 (e.g., 0.8 means 80% fidelity).
+- Provide a single concise sentence explaining your evaluation, noting any missing or insufficient evidence and whether the answer is properly grounded.
 
 Return only a valid JSON object with exactly these keys:
 {{
@@ -109,7 +146,6 @@ def extract_json_from_text(text: str) -> str:
     start = text.find("{")
     if start == -1:
         return ""
-    # Use a counter to find the matching closing brace.
     count = 0
     for i in range(start, len(text)):
         if text[i] == "{":
@@ -118,74 +154,90 @@ def extract_json_from_text(text: str) -> str:
             count -= 1
             if count == 0:
                 return text[start:i+1]
-    return ""  # return empty string if no matching brace found
+    return ""
 
-async def evaluate_query(query: str, golden_entry: str, log_entry: dict) -> dict:
-    # Extract the retrieved context from log entry
+# Evaluate a single query (sequential LLM calls) based on evaluation mode
+async def evaluate_query(query: str, golden_entry: str, log_entry: dict, mode: str) -> dict:
     context = log_entry["context"]
+    result = {"query": query}
 
-    # Evaluate context recall
-    recall_prompt = make_context_recall_prompt(golden_entry, context)
-    try:
-        print(f"🔍 [Context Recall] Evaluating query: {query[:60]}...")
-        recall_llm_raw = await call_azure_llm(recall_prompt)
-        # print("raw response:", recall_llm_raw)
-        # Extract JSON from the raw response
-        json_str_recall = extract_json_from_text(recall_llm_raw)
-        if not json_str_recall:
-            recall_parsed = {"score": 0, "reason": "Empty response"}
-        else:
-            recall_parsed = json.loads(json_str_recall)
-        # print(f"📝 [Context Recall] Extracted JSON: {json_str_recall}")
-    except Exception as e:
-        recall_llm_raw = ""
-        recall_parsed = {"score": 0, "reason": f"Error: {str(e)}"}
-        print(f"⚠️ [Context Recall] Error for query '{query[:40]}': {str(e)}")
+    if mode == "faithfulness":
+        # Faithfulness evaluation uses the generated answer from the log_entry
+        generated = log_entry["response"]
+        faith_prompt = make_faithfulness_prompt(golden_entry, generated)
+        try:
+            print(f"🔍 [Faithfulness] Evaluating query: {query[:60]}...")
+            faith_llm_raw = await call_azure_llm(faith_prompt)
+            json_str_faith = extract_json_from_text(faith_llm_raw)
+            if not json_str_faith:
+                faith_parsed = {"score": 0, "reason": "Empty response"}
+            else:
+                faith_parsed = json.loads(json_str_faith)
+            result["faithfulness"] = {
+                "score": faith_parsed.get("score", 0),
+                "reason": faith_parsed.get("reason", ""),
+                "raw_response": faith_llm_raw
+            }
+        except Exception as e:
+            result["faithfulness"] = {"score": 0, "reason": f"Error: {str(e)}", "raw_response": ""}
+            print(f"⚠️ [Faithfulness] Error for query '{query[:40]}': {str(e)}")
+    else:
+        # Retrieval evaluation (Context Recall & Context Precision)
+        # Evaluate context recall
+        recall_prompt = make_context_recall_prompt(golden_entry, context)
+        try:
+            print(f"🔍 [Context Recall] Evaluating query: {query[:60]}...")
+            recall_llm_raw = await call_azure_llm(recall_prompt)
+            json_str_recall = extract_json_from_text(recall_llm_raw)
+            if not json_str_recall:
+                recall_parsed = {"score": 0, "reason": "Empty response"}
+            else:
+                recall_parsed = json.loads(json_str_recall)
+        except Exception as e:
+            recall_llm_raw = ""
+            recall_parsed = {"score": 0, "reason": f"Error: {str(e)}"}
+            print(f"⚠️ [Context Recall] Error for query '{query[:40]}': {str(e)}")
     
-    # Evaluate context precision
-    precision_prompt = make_context_precision_prompt(golden_entry, context)
-    try:
-        print(f"🔍 [Context Precision] Evaluating query: {query[:60]}...")
-        precision_llm_raw = await call_azure_llm(precision_prompt)
-        # Extract JSON from the raw response
-        json_str_precision = extract_json_from_text(precision_llm_raw)
-        if not json_str_precision:
-            precision_parsed = {"score": 0, "reason": "Empty response"}
-        else:
-            precision_parsed = json.loads(json_str_precision)
-        # print(f"📝 [Context Precision] Extracted JSON: {json_str_precision}")
-    except Exception as e:
-        precision_llm_raw = ""
-        precision_parsed = {"score": 0, "reason": f"Error: {str(e)}"}
-        print(f"⚠️ [Context Precision] Error for query '{query[:40]}': {str(e)}")
+        # Evaluate context precision
+        precision_prompt = make_context_precision_prompt(golden_entry, context)
+        try:
+            print(f"🔍 [Context Precision] Evaluating query: {query[:60]}...")
+            precision_llm_raw = await call_azure_llm(precision_prompt)
+            json_str_precision = extract_json_from_text(precision_llm_raw)
+            if not json_str_precision:
+                precision_parsed = {"score": 0, "reason": "Empty response"}
+            else:
+                precision_parsed = json.loads(json_str_precision)
+        except Exception as e:
+            precision_llm_raw = ""
+            precision_parsed = {"score": 0, "reason": f"Error: {str(e)}"}
+            print(f"⚠️ [Context Precision] Error for query '{query[:40]}': {str(e)}")
     
-    return {
-        "query": query,
-        "context_recall": {
+        result["context_recall"] = {
             "score": recall_parsed.get("score", 0),
             "reason": recall_parsed.get("reason", ""),
             "raw_response": recall_llm_raw
-        },
-        "context_precision": {
+        }
+        result["context_precision"] = {
             "score": precision_parsed.get("score", 0),
             "reason": precision_parsed.get("reason", ""),
             "raw_response": precision_llm_raw
-        },
-    }
+        }
+    return result
 
-
-# Run evaluation pipeline sequentially for all queries
-async def evaluate_pipeline(name: str, logs: list, golden_answers: dict):
-    print(f"\n🚀 Starting evaluation for: {name.upper()} | Total queries: {len(logs)}\n")
+# Run evaluation pipeline sequentially for all queries with a unified result per query
+async def evaluate_pipeline(name: str, logs: list, golden_answers: dict, mode: str):
+    print(f"\n🚀 Starting evaluation for: {name.upper()} | Total queries: {len(logs)} | Mode: {mode}\n")
     output_file = OUTPUT_DIR / f"{name}_eval_v2.json"
 
-    results = []
-
+    results_dict = {}
     # Load existing results if available (optional)
     if output_file.exists():
         print(f"🔁 Loading previously saved results from {output_file}")
         with open(output_file, "r", encoding="utf-8") as f:
-            results = json.load(f)
+            existing_results = json.load(f)
+        for entry in existing_results:
+            results_dict[entry["query"]] = entry
 
     # Process each log entry sequentially
     for idx, log_entry in enumerate(logs, 1):
@@ -195,14 +247,17 @@ async def evaluate_pipeline(name: str, logs: list, golden_answers: dict):
             continue
 
         print(f"\n🔹 [{idx}/{len(logs)}] Query:\n{query[:80]}...\n")
-        golden_entry = golden_answers[query]  # the golden evidence (broad context)
+        golden_entry = golden_answers[query]  # the golden evidence
 
-        evaluation = await evaluate_query(query, golden_entry, log_entry)
-        results.append(evaluation)
+        evaluation = await evaluate_query(query, golden_entry, log_entry, mode)
+        if query in results_dict:
+            results_dict[query].update(evaluation)
+        else:
+            results_dict[query] = evaluation
 
-        # Save incrementally
+        # Save incrementally (convert dict values to list)
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+            json.dump(list(results_dict.values()), f, indent=2, ensure_ascii=False)
     
     print(f"\n✅ Saved evaluation results for {name.upper()} to: {output_file}\n")
 
@@ -210,6 +265,7 @@ async def evaluate_pipeline(name: str, logs: list, golden_answers: dict):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pipeline", required=True, choices=["naive", "optimize"], help="Pipeline to evaluate")
+    parser.add_argument("--mode", required=True, choices=["retrieval", "faithfulness"], help="Evaluation mode: retrieval (context recall and precision) or faithfulness")
     args = parser.parse_args()
 
     print("📥 Loading input files...")
@@ -220,9 +276,9 @@ async def main():
     optimize_logs = load_json(OPTIMIZE_LOGS_FILE)
 
     if args.pipeline == "naive":
-        await evaluate_pipeline("naive", naive_logs, golden_map)
+        await evaluate_pipeline("naive", naive_logs, golden_map, args.mode)
     elif args.pipeline == "optimize":
-        await evaluate_pipeline("optimize", optimize_logs, golden_map)
+        await evaluate_pipeline("optimize", optimize_logs, golden_map, args.mode)
 
 if __name__ == "__main__":
     asyncio.run(main())
