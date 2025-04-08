@@ -3,94 +3,105 @@ import json
 import uuid
 from pathlib import Path
 from tqdm import tqdm
-import logging
 
-# === CONFIGURATION ===
+# === CONFIG ===
 INPUT_DIR = Path("data/standardized_resumes")
-OUTPUT_DIR = Path("data/chunked_resumes_v2")
-LOG_FILE = "logs/chunker_v2.log"
-
+OUTPUT_DIR = Path("data/chunked_resumes")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-os.makedirs("logs", exist_ok=True)
 
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-# === CHUNKING STRATEGY ===
-SECTION_KEYS = [
-    "summary", "education", "experience", "skills", "projects",
-    "certifications", "languages", "social_profiles"
-]
-
-def create_chunk(name, section, content, filename):
-    """Create a standardized chunk with UUID and metadata."""
-    return {
-        "chunk_id": str(uuid.uuid4()),
-        "source": filename,
-        "text": f"{name}\n\nSection: {section.capitalize()}\n\n{content}"
-    }
-
-def convert_section_to_text(section_key, section_value):
-    """Convert structured section to human-readable chunk text."""
-    if isinstance(section_value, str):
-        return section_value
-
-    if isinstance(section_value, list):
-        lines = []
-        for item in section_value:
-            if isinstance(item, str):
-                lines.append(f"- {item}")
-            elif isinstance(item, dict):
-                line = " | ".join([f"{k.capitalize()}: {v}" for k, v in item.items() if v])
-                if line:
-                    lines.append(f"- {line}")
-        return "\n".join(lines)
-
-    return ""
-
-def chunk_resume(file_path: Path):
-    with open(file_path, encoding="utf-8") as f:
-        data = json.load(f)
-
-    name = data.get("name", "Unknown Candidate")
-    filename = file_path.name
+# === CHUNKING LOGIC ===
+def chunk_resume(data: dict, filename: str) -> list:
+    name = data.get("name", "").strip()
     chunks = []
 
-    for key in SECTION_KEYS:
-        content = data.get(key)
-        if not content:
-            continue
+    def make_chunk(section: str, content: str):
+        text = f"{name} - {section}\n\n{content.strip()}"
+        return {
+            "chunk_id": str(uuid.uuid4()),
+            "source": filename,
+            "name": name,
+            "section": section.lower(),
+            "text": text
+        }
 
-        text = convert_section_to_text(key, content)
-        if text.strip():
-            chunk = create_chunk(name, key, text, filename)
-            chunks.append(chunk)
+    if data.get("summary"):
+        chunks.append(make_chunk("Summary", data["summary"]))
+
+    if data.get("education"):
+        edu_text = "\n".join(
+            f"{ed.get('degree', '')}, {ed.get('institution', '')}, {ed.get('year', '')}".strip(", ")
+            for ed in data["education"]
+        )
+        chunks.append(make_chunk("Education", edu_text))
+
+    if data.get("experience"):
+        exp_text = "\n".join(
+            f"{exp.get('title', '')} at {exp.get('company', '')} ({exp.get('duration', '')})"
+            + (f" - {exp.get('description', '')}" if exp.get("description") else "")
+            for exp in data["experience"]
+        )
+        chunks.append(make_chunk("Experience", exp_text))
+
+    if data.get("skills"):
+        skill_text = ", ".join(data["skills"])
+        chunks.append(make_chunk("Skills", skill_text))
+
+    if data.get("projects"):
+        proj_text = "\n".join(
+            f"{proj.get('title', '')}: {proj.get('description', '')}"
+            for proj in data["projects"]
+        )
+        chunks.append(make_chunk("Projects", proj_text))
+
+    if data.get("certifications"):
+        cert_text = "\n".join(
+            f"{cert.get('title', '')}, {cert.get('issuer', '')}, {cert.get('year', '')}".strip(", ")
+            for cert in data["certifications"]
+        )
+        chunks.append(make_chunk("Certifications", cert_text))
+
+    if data.get("languages"):
+        lang_text = ", ".join(data["languages"])
+        chunks.append(make_chunk("Languages", lang_text))
+
+    if data.get("social_profiles"):
+        social_text = "\n".join(
+            f"{profile.get('platform', '')}: {profile.get('link', '')}"
+            for profile in data["social_profiles"]
+        )
+        chunks.append(make_chunk("Social Profiles", social_text))
 
     return chunks
 
-def process_all():
+# === MAIN PROCESSING ===
+def process_file(file_path: Path):
+    output_path = OUTPUT_DIR / file_path.with_suffix(".jsonl").name
+
+    if output_path.exists():
+        print(f"⏩ Skipping {file_path.name} (already processed)")
+        return
+
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        chunks = chunk_resume(data, file_path.name)
+
+        with open(output_path, "w", encoding="utf-8") as out:
+            for chunk in chunks:
+                out.write(json.dumps(chunk) + "\n")
+
+        print(f"✅ Chunked {file_path.name} into {len(chunks)} chunks.")
+
+    except Exception as e:
+        print(f"❌ Failed {file_path.name}: {e}")
+
+def main():
     files = list(INPUT_DIR.glob("*.json"))
-    print(f"📁 Found {len(files)} standardized resumes to chunk...\n")
+    print(f"🔍 Found {len(files)} standardized resumes to chunk.\n")
 
-    for file in tqdm(files, desc="Chunking resumes"):
-        output_path = OUTPUT_DIR / f"{file.stem}.jsonl"
-        if output_path.exists():
-            logging.info(f"⏩ Skipped {file.name} (already chunked)")
-            continue
-
-        try:
-            chunks = chunk_resume(file)
-            with open(output_path, "w", encoding="utf-8") as f:
-                for chunk in chunks:
-                    f.write(json.dumps(chunk) + "\n")
-            logging.info(f"✅ Chunked {file.name} into {len(chunks)} chunks.")
-        except Exception as e:
-            logging.error(f"❌ Failed {file.name} | {str(e)}")
-
-    print("\n✅ Chunking complete.")
+    for file in tqdm(files, desc="Chunking Resumes"):
+        process_file(file)
 
 if __name__ == "__main__":
-    process_all()
+    main()
