@@ -31,7 +31,7 @@ class Retriever:
             logging.error(f"❌ Embedding error: {e}")
             return None
 
-    def query(self, query_text, top_k=10):
+    def query(self, query_text, top_k=100):
         logging.info(f"🔍 Querying: {query_text}")
         
         embedding = self.get_embedding(query_text)

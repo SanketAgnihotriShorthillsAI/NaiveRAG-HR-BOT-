@@ -246,6 +246,24 @@ async def evaluate_pipeline(name: str, logs: list, golden_answers: dict, mode: s
             print(f"⚠️  Skipping query not in golden set: '{query[:60]}...'")
             continue
 
+        # ⏭️ Skip logic: check if already evaluated and not a 429 error
+        if query in results_dict:
+            existing_entry = results_dict[query]
+            reasons = []
+
+            if mode == "faithfulness":
+                reasons.append(existing_entry.get("faithfulness", {}).get("reason", ""))
+            elif mode == "retrieval":
+                reasons.append(existing_entry.get("context_recall", {}).get("reason", ""))
+                reasons.append(existing_entry.get("context_precision", {}).get("reason", ""))
+
+            if all("429 Too Many Requests" not in r for r in reasons if r):
+                print(f"⏭️  Skipping already evaluated query [{idx}]: '{query[:60]}...'")
+                continue
+            else:
+                print(f"🔁 Re-evaluating due to 429 error: '{query[:60]}...'")
+
+
         print(f"\n🔹 [{idx}/{len(logs)}] Query:\n{query[:80]}...\n")
         golden_entry = golden_answers[query]  # the golden evidence
 
