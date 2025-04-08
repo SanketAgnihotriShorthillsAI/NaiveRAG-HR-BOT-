@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from dotenv import load_dotenv
 from llama_parse import LlamaParse
+import fitz  # PyMuPDF
 
 # Load the API key from .env file
 load_dotenv()
@@ -13,7 +14,7 @@ if not api_key:
 
 # Config paths
 RESUME_DIR = Path("data/resumes")
-OUTPUT_DIR = Path("data/processed_resumes")
+OUTPUT_DIR = Path("data/llama_parse_resumes")
 SUPPORTED_EXTENSIONS = [".pdf", ".docx"]
 
 # LlamaParse setup
@@ -23,14 +24,35 @@ parser = LlamaParse(
     do_not_unroll_columns=True
 )
 
+def extract_links_with_fitz(file_path):
+    """Extracts a list of links from a PDF using PyMuPDF"""
+    links = []
+    try:
+        with fitz.open(file_path) as doc:
+            for page_number, page in enumerate(doc, start=1):
+                for link in page.get_links():
+                    if "uri" in link:
+                        links.append({
+                            # "page": page_number,
+                            "text": page.get_textbox(link["from"]).strip(),
+                            "uri": link["uri"]
+                        })
+    except Exception as e:
+        print(f"⚠️ Failed to extract links from {file_path.name}: {e}")
+    return links
+
 def parse_resume(file_path):
     try:
         documents = parser.load_data(file_path)
         combined_text = "\n".join([doc.text for doc in documents])
-        return {
+        parsed = {
             "file": file_path.name,
             "content": combined_text
         }
+        # Only try extracting links if it's a PDF
+        if file_path.suffix.lower() == ".pdf":
+            parsed["links"] = extract_links_with_fitz(file_path)
+        return parsed
     except Exception as e:
         print(f"❌ Failed to parse {file_path.name}: {e}")
         return None
