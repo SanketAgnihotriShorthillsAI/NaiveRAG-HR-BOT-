@@ -65,53 +65,91 @@ class ResumeRetriever:
         return cleaned
 
     async def extract_keywords(self, query: str, use_gemini=False) -> list[str]:
-        print("\n🧠 Calling LLM to extract keywords...")
+        print("\n🧠 Stage 1: Extracting primary keywords...")
 
-        prompt = f"""
-You are an intelligent and helpful keyword extraction engine for a resume retrieval system powered by a NoSQL database (MongoDB). 
+        # ----------- PROMPT 1: Primary Extraction -----------
+        prompt1 = f"""
+    You are an intelligent and helpful keyword extraction engine for a resume retrieval system powered by a NoSQL database (MongoDB).
 
-Given a natural language query, extract a flat list of **search-relevant keywords or phrases**. These keywords will be used to construct MongoDB $regex OR queries over structured JSON resumes to retrieve relevant candidates.
+    Your task is to extract a flat list of highly relevant keywords or phrases from a natural language query. These will be used to construct MongoDB $regex OR queries for searching structured resume JSON documents.
 
-📌 DO extract:
-- Skills, tools, technologies (e.g., \"Python\", \"Postman\", \"GraphQL\")
-- Job titles or roles (e.g., \"data engineer\", \"QA tester\")
-- Domains, frameworks, and platforms
-- Experience levels or durations (e.g., \"5 years experience\", \"mid-level\")
-- Certifications, degrees, or keywords from academic background
+    WHAT TO EXTRACT:
+    ✓ Skills, tools, technologies (e.g., "Python", "Postman", "GraphQL")
+    ✓ Job titles or roles (e.g., "data engineer", "QA tester")
+    ✓ Domains, frameworks, platforms, industry terms
+    ✓ Experience levels or durations (e.g., "5 years experience")
+    ✓ Certifications, degrees, academic phrases
+    ✓ Candidate names (e.g., "rahul sharma") if mentioned explicitly
 
-🚫 DO NOT include:
-- Instructions or intents like \"extract details\", \"provide an example\", \"show resumes with...\"
-- Question words or vague phrases (e.g., \"how\", \"what\", \"example of\")
-- Generic terms like \"project\", \"details\", \"describe\", or filler text
+    DO NOT INCLUDE:
+    ✗ Generic verbs alone ("implemented", "developed", "built", "created")
+    ✗ Generic terms unless required ("project", "experience", "tools", "methodologies")
+    ✗ Instructional or vague words ("how", "what", "describe")
 
-🎯 Objective:
-Identify ONLY the useful keywords that would help retrieve relevant resumes when matched against fields like skills, experience, summary, education, and certifications.
+    OUTPUT FORMAT:
+    Return only a valid JSON array of strings. Example:
+    ["api testing", "postman", "rest", "graphql", "rahul sharma"]
 
-📝 Output Format:
-Return a **valid JSON array** of strings only. Example:
-["api testing", "postman", "rest", "soap", "graphql"]
+    Query:
+    {query}
+    """
 
-Query: "{query}"
-"""
         try:
-            raw = await (self.call_gemini_llm(prompt) if use_gemini else self.call_azure_llm(prompt))
-            print("📝 Raw LLM Response:", raw)
-            cleaned = self.clean_llm_response(raw)
-            keywords = json.loads(cleaned) if cleaned.startswith("[") else []
-            if not isinstance(keywords, list):
-                print("⚠️ Response is not a valid JSON list.")
+            raw1 = await (self.call_gemini_llm(prompt1) if use_gemini else self.call_azure_llm(prompt1))
+            print("📝 Stage 1 Raw Response:", raw1)
+            clean1 = self.clean_llm_response(raw1)
+            print("✅ Stage 1 Cleaned:", clean1)
+            primary_keywords = json.loads(clean1)
+            if not isinstance(primary_keywords, list):
+                print("❌ Stage 1 output is not a list.")
                 return []
-            print("✅ Parsed Keywords:", keywords)
-            return keywords
         except Exception as e:
-            print(f"❌ Keyword extraction failed: {e}")
+            print(f"❌ Stage 1 keyword extraction failed: {e}")
             return []
+
+        # ----------- PROMPT 2: Keyword Expansion and Decomposition -----------
+        print("\n🔁 Stage 2: Refining keywords (expansion and splitting)...")
+
+        prompt2 = f"""
+    You are an assistant improving keyword coverage for document retrieval.
+
+    Given a list of primary keywords extracted from an HR query, enhance them by:
+    1. Adding related/enriched terms that would logically appear in resumes (e.g., "REST" → "rest api", "restful api").
+    2. Breaking down multi-word phrases into additional meaningful terms (e.g., "rahul sharma" → "rahul", "sharma").
+    3. Retaining all original keywords.
+
+    Avoid adding:
+    - Generic verbs unless part of a compound.
+    - Overly vague terms like "experience", "tools", "project", unless critical to the query.
+
+    Return only a flat valid JSON list of keywords. Example:
+    ["api testing", "rest", "rest api", "rahul sharma", "rahul", "sharma"]
+
+    Original Keywords:
+    {json.dumps(primary_keywords, indent=2)}
+    """
+
+        try:
+            raw2 = await (self.call_gemini_llm(prompt2) if use_gemini else self.call_azure_llm(prompt2))
+            print("📝 Stage 2 Raw Response:", raw2)
+            clean2 = self.clean_llm_response(raw2)
+            print("✅ Stage 2 Cleaned:", clean2)
+            final_keywords = json.loads(clean2)
+            if not isinstance(final_keywords, list):
+                print("❌ Stage 2 output is not a list.")
+                return primary_keywords
+            print("🎯 Final Keywords:", final_keywords)
+            return final_keywords
+        except Exception as e:
+            print(f"❌ Stage 2 enrichment failed: {e}")
+            return primary_keywords
+
 
     def build_mongo_query(self, keywords: list[str]) -> dict:
         print("\n🔧 Building MongoDB OR query...")
         or_conditions = []
         fields = [
-            "summary", "skills", "projects.description", "projects.title",
+            "name","summary", "skills", "projects.description", "projects.title",
             "experience.description", "experience.title", "experience.company",
             "education.institution", "certifications.title", "certifications.issuer",
         ]
@@ -121,7 +159,7 @@ Query: "{query}"
                 or_conditions.append({field: {"$regex": kw, "$options": "i"}})
 
         query = {"$or": or_conditions} if or_conditions else {}
-        print("📄 Final Mongo Query:\n", json.dumps(query, indent=2))
+        # print("📄 Final Mongo Query:\n", json.dumps(query, indent=2))
         return query
 
     async def search(self, query: str, use_gemini: bool = False) -> dict:
@@ -147,8 +185,7 @@ Query: "{query}"
             "query": query,
             "keywords": keywords,
             "matched": [
-                {k: v for k, v in res.items() if k != "_id"}
-                for res in results
+               {**res, "_id": str(res["_id"])} for res in results
             ]
         }
     def log_query_result(self, query: str, keywords: list[str], matched: list[dict], log_path: str):
@@ -170,10 +207,10 @@ if __name__ == "__main__":
     retriever = ResumeRetriever()
     result = asyncio.run(retriever.search(args.query, use_gemini=args.use_gemini))
 
-    import pprint
-    pprint.pprint(result)
+    # import pprint
+    # pprint.pprint(result)
 
-    log_path = "data/nosql_retrieval_logs.json"
+    log_path = "data/nosql_retrieval_logs.jsonl"
     retriever.log_query_result(
         query=result["query"],
         keywords=result["keywords"],
