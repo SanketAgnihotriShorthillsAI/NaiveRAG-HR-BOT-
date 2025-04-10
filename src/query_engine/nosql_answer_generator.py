@@ -158,6 +158,7 @@ Based on this, generate a clear, direct summary answer to the query.
 
 
 # === CLI TESTING ===
+# === CLI TESTING ===
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--query", required=True, help="Natural language query")
@@ -165,6 +166,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     async def run():
+        print("🔍 Stage 1: Retrieving resumes...")
         retriever = ResumeRetriever()
         retrieval_result = await retriever.search(args.query, use_gemini=args.use_gemini)
         resumes = retrieval_result.get("matched", [])
@@ -174,10 +176,20 @@ if __name__ == "__main__":
             log("❌ No resumes retrieved. Aborting generation.")
             return
 
+        print("✅ Stage 1 Complete: Resumes retrieved.")
+        print("📊 Number of resumes retrieved:", len(resumes))
+
+        print("\n📌 Stage 2: Reranking resumes...")
         generator = AnswerGenerator(use_gemini=args.use_gemini)
         reranked = await generator.rerank_resumes(args.query, resumes)
+
+        print("✅ Stage 2 Complete: Resumes reranked.")
+        print("📊 Number of resumes after rerank:", len(reranked))
+
+        print("\n✏️ Stage 3: Generating final answer...")
         summary = await generator.generate_answer(args.query, reranked)
 
+        print("✅ Stage 3 Complete: Final answer generated.")
         print("\n📝 FINAL GENERATED ANSWER:\n")
         print(summary)
 
