@@ -1,6 +1,7 @@
 
 import asyncio
 import os
+os.environ["PIPELINE_MODE"] = "true" 
 import json
 from src.query_engine.nl2noSql_query import ResumeRetriever
 from src.query_engine.nosql_answer_generator import AnswerGenerator

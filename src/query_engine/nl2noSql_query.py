@@ -8,6 +8,12 @@ from .config import MONGO_URI, DB_NAME, COLLECTION_NAME
 from dotenv import load_dotenv
 
 load_dotenv()
+PIPELINE_MODE = os.getenv("PIPELINE_MODE", "false").lower() == "true"
+LOG_FILE = "logs/nosql_pipeline.log" if PIPELINE_MODE else "logs/nosql_retriever.log"
+
+def log(msg):
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(msg + "\n")
 
 class ResumeRetriever:
     def __init__(self):
@@ -69,30 +75,49 @@ class ResumeRetriever:
 
         # ----------- PROMPT 1: Primary Extraction -----------
         prompt1 = f"""
-    You are an intelligent and helpful keyword extraction engine for a resume retrieval system powered by a NoSQL database (MongoDB).
+You are an intelligent and helpful keyword extraction engine for a resume retrieval system powered by a NoSQL database (MongoDB).
 
-    Your task is to extract a flat list of highly relevant keywords or phrases from a natural language query. These will be used to construct MongoDB $regex OR queries for searching structured resume JSON documents.
+Your task is to extract a flat list of highly relevant keywords or phrases from a natural language HR query. These keywords will be used to perform $regex OR matches against structured resume documents to retrieve suitable candidates.
 
-    WHAT TO EXTRACT:
-    ✓ Skills, tools, technologies (e.g., "Python", "Postman", "GraphQL")
-    ✓ Job titles or roles (e.g., "data engineer", "QA tester")
-    ✓ Domains, frameworks, platforms, industry terms
-    ✓ Experience levels or durations (e.g., "5 years experience")
-    ✓ Certifications, degrees, academic phrases
-    ✓ Candidate names (e.g., "rahul sharma") if mentioned explicitly
+-------------------------------
+WHAT TO EXTRACT (Keyword Types):
+-------------------------------
+✓ Technical skills, tools, and technologies (e.g., "Python", "Postman", "GraphQL")
+✓ Roles and job titles (e.g., "QA tester", "team lead", "recruitment specialist")
+✓ HR/management actions and responsibilities (e.g., "led teams", "conducted training", "hiring pipeline", "onboarding process")
+✓ Domains, frameworks, and platforms (e.g., "e-commerce", "SAP", "MERN stack")
+✓ Educational qualifications and certifications (e.g., "MBA", "B.Tech", "PMP certified")
+✓ Experience levels or durations (e.g., "5 years experience", "entry-level", "mid-senior")
+✓ Names of candidates (e.g., "rahul sharma") if explicitly mentioned in the query
 
-    DO NOT INCLUDE:
-    ✗ Generic verbs alone ("implemented", "developed", "built", "created")
-    ✗ Generic terms unless required ("project", "experience", "tools", "methodologies")
-    ✗ Instructional or vague words ("how", "what", "describe")
+-------------------------------
+VERB + PHRASE CLARIFICATION:
+-------------------------------
+✓ Keep compound action phrases that describe responsibilities or accomplishments
+    → e.g., "led test automation", "conducted workshops", "managed payroll"
+✗ Do NOT include action verbs as standalone keywords unless the full phrase is meaningful
+    → ❌ "implemented" (bad), ✅ "implemented REST APIs" (good)
 
-    OUTPUT FORMAT:
-    Return only a valid JSON array of strings. Example:
-    ["api testing", "postman", "rest", "graphql", "rahul sharma"]
+-------------------------------
+DO NOT INCLUDE:
+-------------------------------
+✗ Generic verbs on their own ("implemented", "developed", "built", "created")
+✗ Filler terms that add no value unless the query demands them
+    → ("tools", "types", "project", "experience", "etc.")
+✗ Vague instructional words from the question format ("how", "what", "describe", "give an example")
 
-    Query:
-    {query}
-    """
+-------------------------------
+OUTPUT FORMAT:
+-------------------------------
+Return only a valid JSON array of strings. No explanation. Example:
+["api testing", "graphql", "payroll management", "rahul", "rahul sharma"]
+
+-------------------------------
+Query:
+-------------------------------
+{query}
+"""
+
 
         try:
             raw1 = await (self.call_gemini_llm(prompt1) if use_gemini else self.call_azure_llm(prompt1))
