@@ -1,63 +1,137 @@
-import os
-import sys
 import streamlit as st
+import requests
 
-# Setup Python path to import pipeline
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "src")))
 
-from pipeline.pipeline import RAGPipeline
+def log_interaction(question, answer, file_path="./naive_qnalogs.txt"):
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(f"Q: {question}\nA: {answer}\n\n")
 
-# --- Config ---
-st.set_page_config(page_title="HR Resume Bot", layout="wide")
-st.title("💼 HR Assistant RAG Bot")
-st.caption("Ask questions about candidate resumes. Responses are generated using retrieved resume chunks.")
 
-# --- Session State for Chat History ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+API_URL = "http://localhost:8010/query"  # Local NaiveRAG endpoint
 
-if "rag_pipeline" not in st.session_state:
-    st.session_state.rag_pipeline = None
+st.set_page_config(page_title="NaiveRAG - HR Assistant", page_icon="🤖", layout="centered")
 
-# --- Sidebar: Model Selector ---
-st.sidebar.header("🔧 Configuration")
-model_choice = st.sidebar.radio("Choose LLM", ["Gemini", "OpenAI", "OptimizeRag LLM"])
+# --- Custom CSS for better UI ---
+st.markdown("""
+    <style>
+        .chat-container {
+            max-height: 600px;
+            overflow-y: auto;
+            padding-right: 8px;
+            margin-bottom: 1rem;
+        }
 
-use_openai = model_choice == "OpenAI"
-use_optimize_llm = model_choice == "OptimizeRag LLM"
+        .stChatMessage {
+            padding: 0.75rem 1rem;
+            margin: 0.5rem 0;
+            line-height: 1.6;
+            word-wrap: break-word;
+            border-radius: 12px;
+        }
 
-top_k = st.sidebar.slider("Top K Chunks", min_value=3, max_value=600, value=100)
+        .user-msg-wrapper {
+            display: flex;
+            justify-content: flex-end;
+        }
 
-if st.sidebar.button("🔄 Reload Pipeline"):
-    st.session_state.rag_pipeline = RAGPipeline(
-        use_openai=use_openai,
-        use_optimize_llm=use_optimize_llm
-    )
-    st.success("Pipeline reloaded!")
+        .user-msg {
+            background-color: #d6f5ff;
+            color: #00334d;
+            max-width: 60%;
+            text-align: right;
+        }
 
-# Load pipeline if not already loaded
-if st.session_state.rag_pipeline is None:
-    st.session_state.rag_pipeline = RAGPipeline(
-        use_openai=use_openai,
-        use_optimize_llm=use_optimize_llm
-    )
+        .bot-msg-wrapper {
+            display: flex;
+            justify-content: flex-start;
+        }
+
+        .bot-msg {
+            background-color: #f4f4f4;
+            color: #1a1a1a;
+            width: 100%;
+        }
+
+        .stTextInput>div>div>input {
+            border-radius: 20px;
+            padding: 0.75rem;
+            border: 1px solid #888;
+        }
+
+        .stTextInput>div>div>input:focus {
+            border-color: #555;
+            outline: none;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown("## 💼 HR Assistant - NaiveRAG")
+st.markdown("Ask questions related to candidate resumes. This version uses a local RAG pipeline.")
+
+# --- Chat Session State ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "pending_query" not in st.session_state:
+    st.session_state.pending_query = None
+
+query_input = st.chat_input("Ask something about the candidate...", key="naive_query_input")
+
+# Step 1: Handle new query
+if query_input:
+    st.session_state.chat_history.append(("user", query_input))
+    st.session_state.chat_history.append(("bot", "🤖 Thinking..."))
+    st.session_state.pending_query = query_input
+    st.rerun()
+
+# Step 2: Send query to local RAG API
+if st.session_state.pending_query:
+    payload = {
+        "query": st.session_state.pending_query,
+        "use_openai": False,
+        "use_optimize_llm": True,
+        "top_k": 100
+    }
+
+    try:
+        response = requests.post(API_URL, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        reply = result["response"]
+        log_interaction(st.session_state.pending_query, reply)
+    except Exception as e:
+        reply = f"❌ Error: {e}"
+
+    # Replace the last "Thinking..." with the actual reply
+    st.session_state.chat_history[-1] = ("bot", reply)
+    st.session_state.pending_query = None
+    st.rerun()
 
 # --- Chat UI ---
-with st.form("query_form"):
-    user_query = st.text_input("💬 Ask a question:")
-    submitted = st.form_submit_button("Submit")
+st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
-if submitted and user_query:
-    st.session_state.messages.append({"role": "user", "content": user_query})
-
-    with st.spinner("Retrieving & Generating..."):
-        chunks = st.session_state.rag_pipeline.retriever.query(user_query, top_k=top_k)
-        answer, response = st.session_state.rag_pipeline.generator.generate_response(user_query, chunks)
-        st.session_state.messages.append({"role": "assistant", "content": response})
-
-# --- Display Chat Messages ---
-for msg in st.session_state.messages:
-    if msg["role"] == "user":
-        st.markdown(f"**🧑‍💼 You:** {msg['content']}")
+for role, message in st.session_state.chat_history:
+    if role == "user":
+        st.markdown(f"""
+        <div class="user-msg-wrapper">
+            <div class="stChatMessage user-msg">
+                <div style="display: flex; align-items: flex-start; justify-content: flex-end;">
+                    <div style="margin-left: 8px;">👤</div>
+                    <div style="max-width: 100%;">{message}</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.markdown(f"**🤖 Assistant:** {msg['content']}")
+        st.markdown(f"""
+        <div class="bot-msg-wrapper">
+            <div class="stChatMessage bot-msg">
+                <div style="display: flex; align-items: flex-start;">
+                    <div style="margin-right: 8px;">🤖</div>
+                    <div style="max-width: 100%;">{message}</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
