@@ -8,7 +8,9 @@ from .nl2noSql_query import ResumeRetriever
 
 load_dotenv()
 
-LOG_FILE = "logs/answer_generator.log"
+PIPELINE_MODE = os.getenv("PIPELINE_MODE", "false").lower() == "true"
+LOG_FILE = "logs/nosql_pipeline.log" if PIPELINE_MODE else "logs/nosql_generator.log"
+
 os.makedirs("logs", exist_ok=True)
 
 def log(msg):
@@ -134,16 +136,52 @@ Remember:
             for i, res in enumerate(reranked_resumes)
         ])
 
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant that summarizes relevant candidate information based on a natural language query."},
-            {"role": "user", "content": f"""
-Query: {query}
+        prompt = f"""
+--- Role ---
+You are an intelligent and precise assistant that helps HR professionals generate responses from structured resume data. You are not responsible for filtering or reranking — all resumes you are given have already been retrieved and prioritized using earlier stages.
 
-Here are the top-ranked resumes relevant to this query:
+--- Objective ---
+Your task is to generate a clear, complete, and helpful answer to the user's query using **only the provided resume JSONs**. The response should be tailored to the query’s intent — whether it's to list candidates, summarize experiences, identify skillsets, or extract work patterns.
+
+--- Resume Format ---
+You will receive top-ranked resumes as structured JSON objects. Each resume may contain:
+- name, email, phone, location
+- summary, skills, education (degree, institution, year)
+- experience (title, company, duration, location, description)
+- certifications (title, issuer, year)
+- projects (title, description, link)
+- languages, social profiles
+
+--- Query ---
+{query}
+
+
+--- Top-Ranked Resumes ---
 {content_summary}
 
-Based on this, generate a clear, direct summary answer to the query.
-"""}
+--- Response Rules ---
+- ✅ Your answer must be fully grounded in the information from the provided resumes.
+- ✅ Ensure all resumes are rigorously considered and no relevant profiles are skipped. Include every candidate that satisfies the query conditions.
+- ✅ Mention candidate **full names** when referring to individual profiles.
+- ✅ Use markdown formatting (headings, bullet lists, tables) **only if it improves clarity** and is appropriate for the query.
+- ✅ Summarize only what is asked — e.g., tools used, certifications held, companies worked at, transitions made, etc.
+- ✅ Redact personal details like phone numbers or emails.
+- ✅ Be professional, direct, and accurate in tone.
+
+- ❌ Do NOT infer or hallucinate skills, roles, or experience that are not in the resume.
+- ❌ Do NOT speculate on candidate preferences, intentions, or strengths unless explicitly stated.
+- ❌ Do NOT assume answers beyond what's available in the resume fields.
+- ❌ Do NOT re-rank, discard, or comment on the relevance of resumes — that has already been handled.
+
+--- Output ---
+Respond in a helpful, factual tone. Use complete sentences or structured markdown formatting only when needed. Do not provide explanations about how the data was processed — just give the final answer based on resumes.
+
+""".strip()
+
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that summarizes relevant candidate information based on a natural language query."},
+            {"role": "user", "content": prompt}
         ]
 
         try:
@@ -156,8 +194,6 @@ Based on this, generate a clear, direct summary answer to the query.
             log(f"⚠️ Generation failed: {e}")
             return f"⚠️ Generation failed: {e}"
 
-
-# === CLI TESTING ===
 # === CLI TESTING ===
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
