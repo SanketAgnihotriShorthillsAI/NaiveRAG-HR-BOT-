@@ -2,7 +2,7 @@ import json
 import uuid
 from pathlib import Path
 from pymongo import MongoClient
-from config import MONGO_URI, DB_NAME, COLLECTION_NAME
+from .config import MONGO_URI, DB_NAME, COLLECTION_NAME
 
 class ResumeDBManager:
     def __init__(self):
